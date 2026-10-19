@@ -61,8 +61,11 @@ The JS test executes the actual embedded script against a DOM test double for
 search, age, price, discount, sort, favorites, reset and no results.
 Missing-key build was exercised and produced an explicit unavailable status with
 zero offers. JavaScript syntax passed Node's parser.
-No real retailer prices, product links or photos were validated; no GitHub Actions
-run, Pages republication or actual iPhone rendering has been verified.
+GitHub Actions run 39198214467 on the implementation branch verified both test
+suites and the missing-credential build. Build passed; deploy was skipped; health
+failed as intended because no live refresh occurred.
+No real retailer prices, product links or photos were validated. Pages
+republication and actual iPhone rendering have not been verified.
 Browser preview is unavailable in this runtime's supported Sites preview workflow.
 
 ## Sources investigated (2026-10-19 UTC)
