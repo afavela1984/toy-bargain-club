@@ -1,0 +1,22 @@
+
+name: Toy Bargain Club Daily Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  daily-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out website
+        uses: actions/checkout@v4
+
+      - name: Verify website exists
+        run: |
+          test -f index.html
+          echo "Toy Bargain Club daily check successful!"
