@@ -1,22 +1,116 @@
-
-name: Toy Bargain Club Daily Check
-
+name: Toy Bargain Club Daily Deals
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 13 * * *'
-
+    - cron: '0 13 * * *' # 06:00 America/Phoenix, UTC-7 year round. GitHub may delay scheduled runs.
 permissions:
   contents: read
-
+concurrency:
+  group: toy-deals-publication
+  cancel-in-progress: false
 jobs:
-  daily-check:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      refresh_ok: ${{ steps.refresh.outputs.refresh_ok }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test validation and failure handling
+        run: python -m unittest discover -s tests -v
+      - name: Test actual shopping filter script
+        run: node tests/test_filters.cjs
+      - name: Restore most recent temporary dataset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p .runtime
+          artifact_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=deal-state&per_page=10" --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].id // empty')
+          if [ -n "$artifact_id" ]; then
+            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > /tmp/state.zip; then
+              unzip -p /tmp/state.zip state.json > .runtime/state.json || rm -f .runtime/state.json
+            else
+              echo '::warning::Previous temporary state could not be restored.'
+            fi
+          fi
+      - name: Refresh official retailer data and build site
+        id: refresh
+        env:
+          BESTBUY_API_KEY: ${{ secrets.BESTBUY_API_KEY }}
+        run: python scripts/update_deals.py
+      - name: Save temporary successful dataset
+        if: steps.refresh.outputs.refresh_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deal-state
+          path: .runtime/state.json
+          retention-days: 2
+          if-no-files-found: error
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+          retention-days: 1
+  deploy:
+    # A reviewed display license/retention solution is required before enabling.
+    # This gate prevents silently treating static Pages as a TTL-enforced server.
+    if: vars.RETAILER_DISPLAY_APPROVED == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify exact published build, not merely job status
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          EXPECTED: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import os, time, urllib.request
+          url = os.environ['PAGE_URL'].rstrip('/') + '/index.html'
+          marker = '<meta name="tbc-build" content="' + os.environ['EXPECTED'] + '"/>'
+          for attempt in range(8):
+              try:
+                  request = urllib.request.Request(url + '?build=' + os.environ['EXPECTED'], headers={'Cache-Control':'no-cache'})
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      page = response.read().decode()
+                  if marker in page:
+                      print('Verified public Pages HTML contains this run’s unique build ID.')
+                      break
+              except Exception:
+                  pass
+              time.sleep(10)
+          else:
+              raise SystemExit('Published build could not be verified at the public URL.')
+          PY
+  health:
+    if: always()
+    needs: [build, deploy]
     runs-on: ubuntu-latest
     steps:
-      - name: Check out website
-        uses: actions/checkout@v4
-
-      - name: Verify website exists
+      - name: Report actual operational state
+        env:
+          REFRESH_OK: ${{ needs.build.outputs.refresh_ok }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
         run: |
-          test -f index.html
-          echo "Toy Bargain Club daily check successful!"
+          if [ "$REFRESH_OK" != 'true' ]; then
+            echo '::error::Retailer refresh did not succeed; any published offers are explicitly stale or unavailable.'
+            exit 1
+          fi
+          if [ "$DEPLOY_RESULT" != 'success' ]; then
+            echo '::error::Fresh data built but publication is not operational. Check display authorization and Pages configuration.'
+            exit 1
+          fi
